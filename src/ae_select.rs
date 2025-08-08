@@ -8,83 +8,153 @@
  * GNU Affero General Public License v3 (AGPLv3).
  */
 
+use crate::constants::{AE_NONE, AE_READABLE, AE_WRITABLE};
+use crate::fd_set::FdSet;
+use libc::{FD_SETSIZE, select, timeval};
+use std::time::Duration;
 
-#include <sys/select.h>
-#include <string.h>
+#[derive(Debug, Clone, Copy)]
+pub struct FiredEvent {
+    pub fd: i32,
+    pub mask: i32,
+}
 
-typedef struct aeApiState {
-    fd_set rfds, wfds;
+#[allow(non_camel_case_types)]
+pub struct aeApiState {
+    pub rfds: FdSet,
+    pub wfds: FdSet,
     /* We need to have a copy of the fd sets as it's not safe to reuse
      * FD sets after select(). */
-    fd_set _rfds, _wfds;
-} aeApiState;
-
-static int aeApiCreate(aeEventLoop *eventLoop) {
-    aeApiState *state = zmalloc(sizeof(aeApiState));
-
-    if (!state) return -1;
-    FD_ZERO(&state->rfds);
-    FD_ZERO(&state->wfds);
-    eventLoop->apidata = state;
-    return 0;
+    pub _rfds: FdSet,
+    pub _wfds: FdSet,
 }
 
-static int aeApiResize(aeEventLoop *eventLoop, int setsize) {
-    AE_NOTUSED(eventLoop);
-    /* Just ensure we have enough room in the fd_set type. */
-    if (setsize >= FD_SETSIZE) return -1;
-    return 0;
+impl Default for aeApiState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-static void aeApiFree(aeEventLoop *eventLoop) {
-    zfree(eventLoop->apidata);
-}
-
-static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
-    aeApiState *state = eventLoop->apidata;
-
-    if (mask & AE_READABLE) FD_SET(fd,&state->rfds);
-    if (mask & AE_WRITABLE) FD_SET(fd,&state->wfds);
-    return 0;
-}
-
-static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int mask) {
-    aeApiState *state = eventLoop->apidata;
-
-    if (mask & AE_READABLE) FD_CLR(fd,&state->rfds);
-    if (mask & AE_WRITABLE) FD_CLR(fd,&state->wfds);
-}
-
-static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
-    aeApiState *state = eventLoop->apidata;
-    int retval, j, numevents = 0;
-
-    memcpy(&state->_rfds,&state->rfds,sizeof(fd_set));
-    memcpy(&state->_wfds,&state->wfds,sizeof(fd_set));
-
-    retval = select(eventLoop->maxfd+1,
-                &state->_rfds,&state->_wfds,NULL,tvp);
-    if (retval > 0) {
-        for (j = 0; j <= eventLoop->maxfd; j++) {
-            int mask = 0;
-            aeFileEvent *fe = &eventLoop->events[j];
-
-            if (fe->mask == AE_NONE) continue;
-            if (fe->mask & AE_READABLE && FD_ISSET(j,&state->_rfds))
-                mask |= AE_READABLE;
-            if (fe->mask & AE_WRITABLE && FD_ISSET(j,&state->_wfds))
-                mask |= AE_WRITABLE;
-            eventLoop->fired[numevents].fd = j;
-            eventLoop->fired[numevents].mask = mask;
-            numevents++;
+impl aeApiState {
+    pub fn new() -> Self {
+        aeApiState {
+            rfds: FdSet::zero(),
+            wfds: FdSet::zero(),
+            _rfds: FdSet::zero(),
+            _wfds: FdSet::zero(),
         }
-    } else if (retval == -1 && errno != EINTR) {
-        panic("aeApiPoll: select, %s", strerror(errno));
+    }
+}
+
+pub fn ae_api_create() -> Result<Box<aeApiState>, i32> {
+    Ok(Box::new(aeApiState::new()))
+}
+
+pub fn ae_api_resize(setsize: i32) -> i32 {
+    /* Just ensure we have enough room in the fd_set type. */
+    if (setsize as usize) >= FD_SETSIZE {
+        return -1;
     }
 
-    return numevents;
+    0
 }
 
-static char *aeApiName(void) {
-    return "select";
+pub fn ae_api_free(state: Box<aeApiState>) {
+    drop(state);
+}
+
+pub fn ae_api_add_event(state: &mut aeApiState, fd: i32, mask: i32) -> i32 {
+    if mask & AE_READABLE != 0 {
+        state.rfds.set(fd);
+    }
+    if mask & AE_WRITABLE != 0 {
+        state.wfds.set(fd);
+    }
+
+    0
+}
+
+pub fn ae_api_del_event(state: &mut aeApiState, fd: i32, mask: i32) {
+    if mask & AE_READABLE != 0 {
+        state.rfds.clr(fd);
+    }
+    if mask & AE_WRITABLE != 0 {
+        state.wfds.clr(fd);
+    }
+}
+
+pub fn ae_api_poll(
+    state: &mut aeApiState,
+    events: &[crate::ae::AeFileEvent],
+    fired: &mut [FiredEvent],
+    maxfd: i32,
+    tvp: Option<Duration>,
+) -> Result<i32, i32> {
+    state._rfds = state.rfds.clone();
+    state._wfds = state.wfds.clone();
+
+    let timeout_ptr = tvp
+        .map(|d| timeval {
+            tv_sec: d.as_secs() as libc::time_t,
+            tv_usec: d.subsec_micros() as libc::suseconds_t,
+        })
+        .as_mut()
+        .map_or(std::ptr::null_mut(), |t| t as *mut timeval);
+
+    let retval = unsafe {
+        select(
+            maxfd + 1,
+            state._rfds.as_mut_ptr(),
+            state._wfds.as_mut_ptr(),
+            std::ptr::null_mut(), // no exceptfds
+            timeout_ptr,
+        )
+    };
+
+    if retval < 0 {
+        let errno = unsafe { *libc::__error() };
+        /* Ignore EINTR (interrupted system call) like the C version */
+        if errno == libc::EINTR {
+            return Ok(0);
+        }
+        return Err(errno);
+    }
+    if retval == 0 {
+        return Ok(0);
+    }
+
+    let mut numevents = 0;
+    for fd in 0..=maxfd {
+        if numevents >= fired.len() {
+            break;
+        }
+
+        /* Critical: validate that this fd is actually registered for events
+         * This matches the C version: if (fe->mask == AE_NONE) continue; */
+        if fd as usize >= events.len() || events[fd as usize].mask == AE_NONE {
+            continue;
+        }
+
+        let fe = &events[fd as usize];
+        let mut mask = 0;
+
+        /* Only report events that are both ready AND registered */
+        if (fe.mask & AE_READABLE) != 0 && state._rfds.isset(fd) {
+            mask |= AE_READABLE;
+        }
+        if (fe.mask & AE_WRITABLE) != 0 && state._wfds.isset(fd) {
+            mask |= AE_WRITABLE;
+        }
+
+        if mask != 0 {
+            fired[numevents] = FiredEvent { fd, mask };
+            numevents += 1;
+        }
+    }
+
+    Ok(numevents as i32)
+}
+
+pub fn ae_api_name() -> &'static str {
+    "select"
 }
