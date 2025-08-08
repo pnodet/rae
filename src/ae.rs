@@ -539,8 +539,8 @@ fn process_time_events(event_loop: &mut AeEventLoop) -> i32 {
             current = &mut node.next;
         }
 
-        if event_found && time_proc_to_call.is_some() {
-            let retval = time_proc_to_call.unwrap()(event_loop, event_id, client_data);
+        if event_found && let Some(time_proc) = time_proc_to_call {
+            let retval = time_proc(event_loop, event_id, client_data);
             processed += 1;
 
             let updated_now = get_monotonic_us();
@@ -601,15 +601,15 @@ pub fn ae_process_events(event_loop: &mut AeEventLoop, flags: i32) -> i32 {
         };
 
         // Call the multiplexing API, will return only on timeout or when some event fires
-        let numevents = match event_loop.apidata.poll(
-            &event_loop.events,
-            &mut event_loop.fired,
-            event_loop.maxfd,
-            timeout,
-        ) {
-            Ok(n) => n,
-            Err(_) => 0, // Error in polling, continue with 0 events
-        };
+        let numevents = event_loop
+            .apidata
+            .poll(
+                &event_loop.events,
+                &mut event_loop.fired,
+                event_loop.maxfd,
+                timeout,
+            )
+            .unwrap_or(0); // Error in polling, continue with 0 events
 
         // Don't process file events if not requested
         let numevents = if (flags & AE_FILE_EVENTS) != 0 {

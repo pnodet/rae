@@ -35,6 +35,14 @@ pub mod traits;
 #[cfg(any(unix, target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 pub mod ae_select;
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+pub mod ae_kqueue;
+
 pub use constants::{
     AE_ALL_EVENTS, AE_BARRIER, AE_CALL_AFTER_SLEEP, AE_CALL_BEFORE_SLEEP, AE_DONT_WAIT, AE_ERR,
     AE_FILE_EVENTS, AE_NOMORE, AE_OK, AE_TIME_EVENTS,
