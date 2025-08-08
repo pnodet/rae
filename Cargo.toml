@@ -1,0 +1,8 @@
+[package]
+name = "rae"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mio = { version = "1.0.4", features = ["os-poll", "net"] }
+libc = "0.2.159"
